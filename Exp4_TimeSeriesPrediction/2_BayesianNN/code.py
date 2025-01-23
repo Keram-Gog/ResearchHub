@@ -2,16 +2,18 @@ import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from bayeformers import to_bayesian
-import bayeformers.nn as bnn
+
+# Ввод параметров с консоли
+num_hidden_layers = int(input("Введите количество скрытых слоев: "))
+test_size_ratio = float(input("Введите долю данных для теста (0.1 - 0.5): "))
 
 # Загрузка данных
 data = pd.read_csv("D:\\source\\нир вр ряды\\data\\Microsoft_Stock.csv", sep=',')  # Замените на путь к вашему датасету
 
-# Предположим, что вы хотите предсказать Close на основе Open, High, Low и Volume
+# Определяем признаки
 input_features = ['Open', 'High', 'Low', 'Volume']
 columns_to_predict = ['Close']
 
@@ -19,21 +21,18 @@ columns_to_predict = ['Close']
 scaler = MinMaxScaler()
 data[input_features + columns_to_predict] = scaler.fit_transform(data[input_features + columns_to_predict])
 
-# Функция для создания пропусков в данных
+# Создание пропусков
 def create_missing_data(data, missing_percentage=0.1):
     missing_days = int(len(data) * missing_percentage)
     missing_indices = np.random.choice(data.index, size=missing_days, replace=False)
     data.loc[missing_indices, input_features + columns_to_predict] = np.nan
     return data
 
-# Применяем прореживание с разным процентом пропусков
-data_with_missing = create_missing_data(data.copy(), missing_percentage=0.2)  # Пример с 20% пропусков
-
-# Заполнение пропусков с помощью метода forward-fill (используем значения предыдущих дней)
+data_with_missing = create_missing_data(data.copy(), missing_percentage=0.2)
 data_with_missing.fillna(method='ffill', inplace=True)
 
-# Формирование временных шагов
-sequence_length = 30  # Длина временной последовательности для модели
+# Формирование последовательностей
+sequence_length = 30
 
 def create_sequences(data, input_features, target_columns, seq_length):
     X, y = [], []
@@ -44,64 +43,76 @@ def create_sequences(data, input_features, target_columns, seq_length):
 
 X, y = create_sequences(data_with_missing, input_features, columns_to_predict, sequence_length)
 
-# Методическое разделение данных на обучающую и тестовую выборки
-train_size = int(len(data_with_missing) * 0.8)  # 80% для обучения
-train_data, test_data = data_with_missing[:train_size], data_with_missing[train_size:]
+# Фиксированное разделение данных с использованием random seed
+def fixed_split_data(data, test_size_ratio, random_seed=42):
+    np.random.seed(random_seed)
+    total_size = len(data)
+    test_size = int(total_size * test_size_ratio)
+    all_indices = np.arange(total_size)
+    test_indices = np.random.choice(all_indices, size=test_size, replace=False)
+    train_indices = np.setdiff1d(all_indices, test_indices)
+    
+    train_data = data.iloc[train_indices]
+    test_data = data.iloc[test_indices]
+    
+    return train_data, test_data
+
+# Разделение данных с фиксированными тестовыми данными
+train_data, test_data = fixed_split_data(data_with_missing, test_size_ratio)
 
 X_train, y_train = create_sequences(train_data, input_features, columns_to_predict, sequence_length)
 X_test, y_test = create_sequences(test_data, input_features, columns_to_predict, sequence_length)
 
-# Преобразуем данные в 2D для подачи в модель
-X_train_2D = X_train.reshape(X_train.shape[0], -1)
-X_test_2D = X_test.reshape(X_test.shape[0], -1)
-
-# Преобразуем в тензоры для PyTorch
-X_train_tensor = torch.tensor(X_train_2D, dtype=torch.float32)
-X_test_tensor = torch.tensor(X_test_2D, dtype=torch.float32)
+# Подготовка данных
+X_train_tensor = torch.tensor(X_train.reshape(X_train.shape[0], -1), dtype=torch.float32)
+X_test_tensor = torch.tensor(X_test.reshape(X_test.shape[0], -1), dtype=torch.float32)
 y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
 y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
 
-# Байесовская модель с одним слоем (среднее и дисперсия)
+# Определение модели
 class BayesianRegressionModelWithVariance(nn.Module):
-    def __init__(self):
+    def __init__(self, input_size, hidden_layer_size, num_hidden_layers):
         super(BayesianRegressionModelWithVariance, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(X_train_tensor.shape[1], 64),  # Один скрытый слой
-            nn.ReLU(),
-            nn.Linear(64, 2)  # Выходной слой (среднее и дисперсия)
-        )
+        layers = [nn.Linear(input_size, hidden_layer_size), nn.ReLU()]
+        for _ in range(num_hidden_layers - 1):
+            layers.append(nn.Linear(hidden_layer_size, hidden_layer_size))
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden_layer_size, 2))
+        self.network = nn.Sequential(*layers)
 
     def forward(self, x):
         output = self.network(x)
-        mean = output[:, 0]  # Среднее значение
-        log_variance = output[:, 1]  # Логарифм дисперсии для стабилизации
-        variance = torch.exp(log_variance)  # Дисперсия
+        mean = output[:, 0]
+        log_variance = output[:, 1]
+        variance = torch.exp(log_variance)
         return mean, variance
 
 # Инициализация модели
-model = BayesianRegressionModelWithVariance()
+input_size = X_train_tensor.shape[1]
+hidden_layer_size = 64
+model = BayesianRegressionModelWithVariance(input_size, hidden_layer_size, num_hidden_layers)
 
-# Преобразование модели в байесовскую с использованием bayeformers
+# Преобразование модели в байесовскую
 bayesian_model = to_bayesian(model, delta=0.05, freeze=True)
 
 # Настройка оптимизатора
 optimizer = torch.optim.Adam(bayesian_model.parameters(), lr=0.001)
 epochs = 100
 
-# Обучение байесовской модели
+# Обучение модели
+print("\nНачало обучения...")
 for epoch in range(epochs):
     bayesian_model.train()
     optimizer.zero_grad()
-    mean, variance = bayesian_model(X_train_tensor)  # Прогнозируем среднее и дисперсию
-    nll_loss = 0.5 * torch.mean(variance + (y_train_tensor - mean) ** 2 / variance)  # Байесовская ошибка с учетом дисперсии
-    loss = nll_loss  # Потери для оптимизации
-    loss.backward()
+    mean, variance = bayesian_model(X_train_tensor)
+    nll_loss = 0.5 * torch.mean(variance + (y_train_tensor - mean) ** 2 / variance)
+    nll_loss.backward()
     optimizer.step()
-
     if (epoch + 1) % 10 == 0:
-        print(f"Epoch [{epoch + 1}/{epochs}], Loss: {loss.item():.4f}")
+        print(f"Epoch [{epoch + 1}/{epochs}], Loss: {nll_loss.item():.4f}")
 
-# Оценка модели на тестовой выборке
+# Оценка модели
+print("\nОценка модели...")
 bayesian_model.eval()
 with torch.no_grad():
     test_mean, test_variance = bayesian_model(X_test_tensor)

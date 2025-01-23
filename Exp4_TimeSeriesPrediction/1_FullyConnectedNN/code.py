@@ -4,8 +4,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+
 
 # Датасет для временных рядов
 class TimeSeriesDataset(Dataset):
@@ -19,92 +19,48 @@ class TimeSeriesDataset(Dataset):
     def __getitem__(self, idx):
         return self.data[idx], self.targets[idx]
 
-# Полносвязная модель для временных рядов с 6 слоями
+
+# Полносвязная модель с динамическим количеством слоёв
 class FullyConnectedModel(nn.Module):
-    def __init__(self, input_size, output_size):
+    def __init__(self, input_size, output_size, num_layers=6, hidden_units=128):
         super(FullyConnectedModel, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(input_size, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, 8),
-            nn.ReLU(),
-            nn.Linear(8, 4),
-            nn.ReLU(),
-            nn.Linear(4, output_size)
-        )
+        layers = []
+        current_size = input_size
+
+        for _ in range(num_layers):
+            layers.append(nn.Linear(current_size, hidden_units))
+            layers.append(nn.ReLU())
+            current_size = hidden_units
+            hidden_units //= 2  # Сокращаем количество нейронов вдвое на каждом слое
+
+        layers.append(nn.Linear(current_size, output_size))  # Выходной слой
+        self.fc = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.fc(x)
 
-# Функция для удаления дней
-def drop_days(data, drop_percentage):
-    """
-    Убирает данные за случайные дни с заданным процентом пропусков.
-    """
-    unique_days = data.index.unique()
-    num_days_to_drop = int(len(unique_days) * drop_percentage)
-    days_to_drop = np.random.choice(unique_days, num_days_to_drop, replace=False)
-    return data.drop(index=days_to_drop)
 
 # Функция для заполнения пропусков
 def fill_missing_data(data):
-    """
-    Заполняет пропущенные значения в данных методом линейной интерполяции.
-    """
-    return data.interpolate(method='linear', limit_direction='forward', axis=0)
+    return data.interpolate(method="linear", limit_direction="forward", axis=0)
 
-# Функция для разделения данных
-def split_data(data, test_size=0.1):
-    """
-    Делит данные на тренировочные и тестовые выборки.
-    """
-    train_data = data.iloc[:-int(len(data) * test_size)]
-    test_data = data.iloc[-int(len(data) * test_size):]
+
+# Функция для разделения данных (с фиксацией теста)
+def split_data(data, test_size, random_seed=42):
+    # Устанавливаем seed для воспроизводимости
+    np.random.seed(random_seed)
+    # Фиксируем случайную выборку теста
+    total_size = len(data)
+    test_size = int(total_size * test_size)
+    all_indices = np.arange(total_size)
+    test_indices = np.random.choice(all_indices, size=test_size, replace=False)
+    train_indices = np.setdiff1d(all_indices, test_indices)
+    
+    train_data = data.iloc[train_indices]
+    test_data = data.iloc[test_indices]
+    
     return train_data, test_data
 
-# Функция для обучения модели
-def train_model(model, train_loader, criterion, optimizer, epochs):
-    model.train()
-    for epoch in range(epochs):
-        total_loss = 0
-        for data, targets in train_loader:
-            data, targets = data.to(device), targets.to(device)
-            outputs = model(data)
-            loss = criterion(outputs, targets)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        print(f"Epoch {epoch + 1}/{epochs}, Loss: {total_loss / len(train_loader):.4f}")
-
-# Функция для тестирования модели
-def test_model(model, test_loader):
-    model.eval()
-    total_loss = 0
-    mae = 0
-    all_targets = []
-    all_outputs = []
-    with torch.no_grad():
-        for data, targets in test_loader:
-            data, targets = data.to(device), targets.to(device)
-            outputs = model(data)
-            loss = criterion(outputs, targets)
-            total_loss += loss.item()
-            mae += torch.sum(torch.abs(outputs - targets)).item()
-            all_targets.append(targets)
-            all_outputs.append(outputs)
-    all_targets = torch.cat(all_targets, dim=0)
-    all_outputs = torch.cat(all_outputs, dim=0)
-    variance = torch.mean((all_outputs - all_targets.mean())**2).item()
-    print(f"Test Loss: {total_loss / len(test_loader):.4f}")
-    print(f"Mean Absolute Error (MAE): {mae / len(test_loader.dataset):.4f}")
-    print(f"Variance: {variance:.4f}")
 
 # Загрузка данных
 file_path = r"D:\source\нир вр ряды\data\Microsoft_Stock.csv"  # Укажите путь к CSV-файлу
@@ -117,10 +73,6 @@ data = data.sort_values("Date").set_index("Date")
 # Используем только числовые столбцы
 numerical_columns = ["Open", "High", "Low", "Close", "Volume"]
 data = data[numerical_columns]
-
-# Прореживание данных
-drop_percentage = 0.2  # Пример: исключить 20% дней
-data = drop_days(data, drop_percentage)
 
 # Заполнение пропусков
 data = fill_missing_data(data)
@@ -139,29 +91,43 @@ for i in range(len(data_scaled) - seq_len):
 X_seq = torch.tensor(X_seq, dtype=torch.float32)
 y_seq = torch.tensor(y_seq, dtype=torch.float32).unsqueeze(1)
 
-# Разделение данных
-train_data, test_data = split_data(pd.DataFrame(data_scaled), test_size=0.1)
-X_train, X_test = torch.tensor(train_data.values[:-seq_len], dtype=torch.float32), torch.tensor(test_data.values, dtype=torch.float32)
-y_train, y_test = y_seq[:len(X_train)], y_seq[-len(X_test):]
+# Получение параметров от пользователя
+test_size = float(input("Введите размер тестовой выборки (например, 0.2 для 20%): "))  # Фиксируем тестовый размер
+num_layers = int(input("Введите количество скрытых слоёв модели: "))
+
+# Разделение данных с фиксированными тестовыми данными
+train_data, test_data = split_data(pd.DataFrame(X_seq.numpy()), test_size=test_size)
+train_labels, test_labels = split_data(pd.DataFrame(y_seq.numpy()), test_size=test_size)
+
+# Преобразование обратно в тензоры
+X_train = torch.tensor(train_data.values, dtype=torch.float32)
+y_train = torch.tensor(train_labels.values, dtype=torch.float32).unsqueeze(1)
+X_test = torch.tensor(test_data.values, dtype=torch.float32)
+y_test = torch.tensor(test_labels.values, dtype=torch.float32).unsqueeze(1)
 
 # Подготовка DataLoader
-train_dataset = TimeSeriesDataset(X_train.view(X_train.size(0), -1), y_train)
-test_dataset = TimeSeriesDataset(X_test.view(X_test.size(0), -1), y_test)
+train_dataset = TimeSeriesDataset(X_train, y_train)
+test_dataset = TimeSeriesDataset(X_test, y_test)
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
 # Параметры модели
-input_size = X_train.size(1) * seq_len
+input_size = X_train.size(1) * X_train.size(2)  # seq_len * feature_size
 output_size = 1
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = FullyConnectedModel(input_size, output_size).to(device)
+
+# Создание модели
+model = FullyConnectedModel(input_size=input_size, output_size=output_size, num_layers=num_layers).to(device)
 
 # Оптимизатор и функция потерь
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-# Обучение
-train_model(model, train_loader, criterion, optimizer, epochs=50)
+# Обучение модели
+epochs = 50
+print("\nНачало обучения...")
+train_model(model, train_loader, criterion, optimizer, epochs)
 
-# Тестирование
+# Тестирование модели
+print("\nТестирование модели...")
 test_model(model, test_loader)

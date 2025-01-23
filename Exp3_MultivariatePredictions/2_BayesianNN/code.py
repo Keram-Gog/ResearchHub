@@ -8,6 +8,17 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from bayeformers import to_bayesian
 
+# Установка фиксированного random seed
+random_seed = 42
+np.random.seed(random_seed)
+torch.manual_seed(random_seed)
+
+# Получение параметров от пользователя
+train_size = int(input("Введите размер обучающей выборки (например, 100): "))  # Размер обучающей выборки
+test_size = 100  # Размер тестовой выборки фиксирован
+sequence_length = int(input("Введите длину временной последовательности (например, 30): "))
+epochs = int(input("Введите количество эпох для обучения (например, 100): "))
+
 # Загрузка данных
 data = pd.read_csv("D:\\питон\\MO\\1\\этот\\global_mean_sea_level_1993-2024.csv", sep=',')
 
@@ -24,8 +35,6 @@ scaler = MinMaxScaler()
 data[input_features + columns_to_predict] = scaler.fit_transform(data[input_features + columns_to_predict])
 
 # Формирование временных шагов
-sequence_length = 30
-
 def create_sequences(data, input_features, target_columns, seq_length):
     X, y = [], []
     for i in range(len(data) - seq_length):
@@ -35,14 +44,15 @@ def create_sequences(data, input_features, target_columns, seq_length):
 
 X, y = create_sequences(data, input_features, columns_to_predict, sequence_length)
 
-# Разделение на обучающую и тестовую выборки
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# Фиксируем тестовую выборку
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.2, random_state=random_seed)
+X_test, _, y_test, _ = train_test_split(X_temp, y_temp, test_size=test_size / (1 - 0.2), random_state=random_seed)
 
 # Преобразование в 2D для полносвязной сети
 X_train_2D = X_train.reshape(X_train.shape[0], -1)
 X_test_2D = X_test.reshape(X_test.shape[0], -1)
 
-# Преобразуем в тензоры для PyTorch
+# Преобразование в тензоры для PyTorch
 X_train_tensor = torch.tensor(X_train_2D, dtype=torch.float32)
 X_test_tensor = torch.tensor(X_test_2D, dtype=torch.float32)
 y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
@@ -77,7 +87,6 @@ bayesian_model = to_bayesian(model, delta=0.05, freeze=True)
 
 # Настройка параметров обучения
 optimizer = torch.optim.Adam(bayesian_model.parameters(), lr=0.001)
-epochs = 100
 
 # Обучение байесовской модели
 for epoch in range(epochs):

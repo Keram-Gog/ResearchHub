@@ -1,10 +1,29 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error
 import pandas as pd
+import numpy as np
+
+# Получение параметров с консоли с проверкой корректности ввода
+while True:
+    try:
+        num_layers = int(input("Введите количество слоёв трансформера: "))
+        if num_layers <= 0:
+            raise ValueError("Количество слоёв должно быть положительным числом.")
+        break
+    except ValueError as e:
+        print(e)
+
+while True:
+    try:
+        test_size = float(input("Введите размер тестовой выборки (например, 0.1 для 10%): "))
+        if test_size <= 0 or test_size >= 1:
+            raise ValueError("Размер тестовой выборки должен быть в пределах от 0 до 1.")
+        break
+    except ValueError as e:
+        print(e)
 
 # 1. Загрузка и подготовка данных
 data = pd.read_csv('nifty_500.csv', sep=',')
@@ -17,13 +36,14 @@ X = pd.get_dummies(X)
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
-X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.9, random_state=42)
+# 2. Разделение данных на обучающую и тестовую выборки
+X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=test_size, random_state=42)
 X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
 X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
 y_train_tensor = torch.tensor(y_train.values, dtype=torch.float32).view(-1, 1)
 y_test_tensor = torch.tensor(y_test.values, dtype=torch.float32).view(-1, 1)
 
-# 2. Определение модели с готовым трансформером
+# 3. Определение модели с трансформером
 class TransformerRegression(nn.Module):
     def __init__(self, input_dim, embed_size, num_heads, num_layers, dropout):
         super(TransformerRegression, self).__init__()
@@ -45,20 +65,24 @@ class TransformerRegression(nn.Module):
         x = x.mean(dim=1)      # Усреднение по seq_len
         return self.fc_out(x)
 
-# 3. Гиперпараметры модели
+# 4. Гиперпараметры модели
 input_dim = X_train_tensor.shape[1]
 embed_size = 64
 num_heads = 4
-num_layers = 1
 dropout = 0.1
 
 model = TransformerRegression(input_dim, embed_size, num_heads, num_layers, dropout)
 
-# 4. Настройка оптимизации
+# 5. Настройка оптимизации
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 loss_fn = nn.MSELoss()
 
-# 5. Обучение модели
+# 6. Использование CUDA, если доступно
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = model.to(device)
+X_train_tensor, X_test_tensor, y_train_tensor, y_test_tensor = X_train_tensor.to(device), X_test_tensor.to(device), y_train_tensor.to(device), y_test_tensor.to(device)
+
+# 7. Обучение модели
 epochs = 100
 for epoch in range(epochs):
     model.train()
@@ -67,10 +91,10 @@ for epoch in range(epochs):
     loss = loss_fn(predictions, y_train_tensor)
     loss.backward()
     optimizer.step()
-    if (epoch + 1) % 10 == 0:
+    if (epoch + 1) % 10 == 0:  # Выводим информацию каждые 10 эпох
         print(f"Epoch [{epoch + 1}/{epochs}], Loss: {loss.item():.4f}")
 
-# 6. Оценка модели с вычислением дисперсии
+# 8. Оценка модели с вычислением дисперсии
 model.eval()
 
 # Функция для активации дропаутов в тестовом режиме
@@ -87,10 +111,9 @@ predictions_list = []
 with torch.no_grad():
     for _ in range(num_samples):
         predictions = model(X_test_tensor).squeeze()
-        predictions_list.append(predictions.numpy())
+        predictions_list.append(predictions.cpu().numpy())
 
 # Преобразуем список прогнозов в массив
-import numpy as np
 predictions_array = np.array(predictions_list)
 
 # Среднее и дисперсия прогнозов

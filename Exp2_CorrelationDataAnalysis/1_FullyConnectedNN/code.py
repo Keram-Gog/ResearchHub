@@ -6,6 +6,11 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import numpy as np
 
+# Получение параметров с консоли
+num_layers = int(input("Введите количество скрытых слоёв (например, 5): "))
+train_size = int(input("Введите размер тренировочной выборки (например, 100): "))
+test_size = int(input("Введите размер тестовой выборки (например, 100): "))
+
 # 1. Загрузка и подготовка данных
 data = pd.read_csv('nifty_500.csv', sep=',')
 
@@ -20,8 +25,11 @@ X = pd.get_dummies(X)
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
-# Разделение данных на обучающую и тестовую выборки
-X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.1, random_state=42)
+# Фиксируем random_state для того, чтобы тестовые данные были одинаковыми
+random_state = 42
+
+# Разделим данные, используя фиксированный random_state, чтобы тестовые данные всегда были одинаковыми
+X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, train_size=train_size + test_size, test_size=test_size, random_state=random_state)
 
 # Преобразуем в тензоры
 X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
@@ -29,30 +37,25 @@ X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
 y_train_tensor = torch.tensor(y_train.values, dtype=torch.float32).view(-1, 1)
 y_test_tensor = torch.tensor(y_test.values, dtype=torch.float32).view(-1, 1)
 
-# 2. Построение полносвязной нейронной сети
+# 2. Построение полносвязной нейронной сети с динамическим количеством слоев
 class RegressionModel(nn.Module):
-    def __init__(self, input_dim):
+    def __init__(self, input_dim, num_layers):
         super(RegressionModel, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, 64),  # 1 скрытый слой с 64 нейронами
-            nn.ReLU(),  # Функция активации ReLU
-            nn.Linear(64, 128),  # 2 скрытый слой с 128 нейронами
-            nn.ReLU(),  # Функция активации ReLU
-            nn.Linear(128, 256),  # 3 скрытый слой с 256 нейронами
-            nn.ReLU(),  # Функция активации ReLU
-            nn.Linear(256, 128),  # 4 скрытый слой с 128 нейронами
-            nn.ReLU(),  # Функция активации ReLU
-            nn.Linear(128, 64),  # 5 скрытый слой с 64 нейронами
-            nn.ReLU(),  # Функция активации ReLU
-            nn.Linear(64, 1)  # Выходной слой
-        )
+        layers = []
+        current_dim = input_dim
+        for _ in range(num_layers):
+            layers.append(nn.Linear(current_dim, current_dim // 2))
+            layers.append(nn.ReLU())
+            current_dim //= 2  # Уменьшаем размер слоя в 2 раза
+        layers.append(nn.Linear(current_dim, 1))  # Выходной слой
+        self.network = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.network(x)
 
 # Создание модели
 input_dim = X_train_tensor.shape[1]
-model = RegressionModel(input_dim)
+model = RegressionModel(input_dim, num_layers)
 
 # 3. Настройка параметров обучения
 criterion = nn.MSELoss()  # Функция потерь (среднеквадратичная ошибка)

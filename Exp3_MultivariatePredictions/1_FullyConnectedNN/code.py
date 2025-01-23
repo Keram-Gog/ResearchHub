@@ -7,6 +7,17 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+# Установка фиксированного random seed
+random_seed = 42
+np.random.seed(random_seed)
+torch.manual_seed(random_seed)
+
+# Получение параметров от пользователя
+train_size = int(input("Введите размер обучающей выборки (например, 100): "))  # Только размер трейна
+test_size = 100  # Размер тестовой выборки фиксирован
+sequence_length = int(input("Введите длину временной последовательности (например, 30): "))
+num_layers = int(input("Введите количество скрытых слоёв (например, 4): "))
+
 # Загрузка данных
 data = pd.read_csv("D:\\питон\\MO\\1\\этот\\global_mean_sea_level_1993-2024.csv", sep=',')
 
@@ -23,8 +34,6 @@ scaler = MinMaxScaler()
 data[input_features + columns_to_predict] = scaler.fit_transform(data[input_features + columns_to_predict])
 
 # Формирование временных шагов
-sequence_length = 30
-
 def create_sequences(data, input_features, target_columns, seq_length):
     X, y = [], []
     for i in range(len(data) - seq_length):
@@ -34,8 +43,9 @@ def create_sequences(data, input_features, target_columns, seq_length):
 
 X, y = create_sequences(data, input_features, columns_to_predict, sequence_length)
 
-# Разделение на обучающую и тестовую выборки
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# Фиксируем тестовую выборку
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.2, random_state=random_seed)
+X_test, _, y_test, _ = train_test_split(X_temp, y_temp, test_size=test_size / (1 - 0.2), random_state=random_seed)
 
 # Преобразование данных в тензоры
 X_train_tensor = torch.tensor(X_train, dtype=torch.float32).reshape(X_train.shape[0], -1)  # В 2D для полносвязной сети
@@ -43,23 +53,22 @@ X_test_tensor = torch.tensor(X_test, dtype=torch.float32).reshape(X_test.shape[0
 y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
 y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
 
-# Создание полносвязной нейронной сети
+# Создание полносвязной нейронной сети с динамическим числом слоёв
 class FullyConnectedNN(nn.Module):
-    def __init__(self, input_dim, output_dim):
+    def __init__(self, input_dim, output_dim, hidden_layer_size, num_layers):
         super(FullyConnectedNN, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, output_dim)
-        )
+        layers = []
+        current_size = input_dim
+
+        # Добавляем скрытые слои
+        for _ in range(num_layers):
+            layers.append(nn.Linear(current_size, hidden_layer_size))
+            layers.append(nn.ReLU())
+            current_size = hidden_layer_size
+
+        # Выходной слой
+        layers.append(nn.Linear(current_size, output_dim))
+        self.network = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.network(x)
@@ -67,7 +76,8 @@ class FullyConnectedNN(nn.Module):
 # Инициализация модели, функции потерь и оптимизатора
 input_dim = X_train_tensor.shape[1]
 output_dim = y_train_tensor.shape[1]
-model = FullyConnectedNN(input_dim, output_dim)
+hidden_layer_size = 256  # Фиксированный размер скрытых слоёв
+model = FullyConnectedNN(input_dim, output_dim, hidden_layer_size, num_layers)
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 

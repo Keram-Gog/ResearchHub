@@ -7,7 +7,6 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.impute import SimpleImputer
-from torch.utils.data import DataLoader, Dataset
 
 # Загрузка данных
 data = pd.read_csv("D:/source/нир вр ряды/data/Microsoft_Stock.csv", sep=',')  # Замените на путь к вашему датасету
@@ -50,8 +49,12 @@ def create_sequences(data, input_features, target_columns, seq_length):
 
 X, y = create_sequences(data_with_drops, input_features, columns_to_predict, sequence_length)
 
+# Получаем параметры с консоли
+test_size = float(input("Введите размер тестовой выборки (например, 0.1 для 10%): "))
+num_encoder_layers = int(input("Введите количество слоев трансформера (например, 2): "))
+
 # Разделение на обучающую и тестовую выборки
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
 
 # Преобразуем данные в 2D для подачи в модель
 X_train_2D = X_train.reshape(X_train.shape[0], -1)
@@ -80,7 +83,7 @@ class BayesianTransformerModel(nn.Module):
 
     def forward(self, x):
         x = self.fc(x)  # Применяем полносвязный слой
-        x = x.unsqueeze(0)  # Вставляем размерность для seq_len (transformer ожидает вход [seq_len, batch_size, features])
+        x = x.permute(1, 0, 2)  # Меняем размерность на [seq_len, batch_size, features]
         
         x = self.transformer(x)  # Применяем трансформер
         
@@ -95,7 +98,7 @@ class BayesianTransformerModel(nn.Module):
         return mean, variance
 
 # Инициализация модели
-model = BayesianTransformerModel(input_size=X_train_tensor.shape[1], seq_len=sequence_length)
+model = BayesianTransformerModel(input_size=X_train_tensor.shape[1], seq_len=sequence_length, num_encoder_layers=num_encoder_layers)
 
 # Настройка оптимизатора
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)

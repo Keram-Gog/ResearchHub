@@ -6,6 +6,23 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
+# Установка фиксированного random seed для воспроизводимости
+random_seed = 42
+np.random.seed(random_seed)
+torch.manual_seed(random_seed)
+
+# Ввод только основных параметров от пользователя
+train_size = float(input("Введите размер обучающей выборки (например, 0.8 для 80%): "))  # Размер обучающей выборки
+sequence_length = int(input("Введите длину временной последовательности (например, 30): "))
+
+# Фиксированные параметры
+epochs = 50
+batch_size = 16
+num_heads = 8
+num_layers = 8
+d_model = 64
+test_size = 100  # Фиксированный размер тестовой выборки
+
 # Загрузка данных
 data = pd.read_csv("D:\\питон\\MO\\1\\этот\\global_mean_sea_level_1993-2024.csv", sep=',')
 
@@ -22,8 +39,6 @@ scaler = MinMaxScaler()
 data[input_features + columns_to_predict] = scaler.fit_transform(data[input_features + columns_to_predict])
 
 # Формирование временных шагов
-sequence_length = 30
-
 def create_sequences(data, input_features, target_columns, seq_length):
     X, y = [], []
     for i in range(len(data) - seq_length):
@@ -33,8 +48,12 @@ def create_sequences(data, input_features, target_columns, seq_length):
 
 X, y = create_sequences(data, input_features, columns_to_predict, sequence_length)
 
-# Разделение на обучающую и тестовую выборки
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+# Фиксируем тестовую выборку
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.2, random_state=random_seed)
+X_test, _, y_test, _ = train_test_split(X_temp, y_temp, test_size=test_size / (1 - 0.2), random_state=random_seed)
+
+# Разделение обучающей выборки на train_size
+X_train, _, y_train, _ = train_test_split(X_train, y_train, test_size=1 - train_size, random_state=random_seed)
 
 # Преобразуем в тензоры для PyTorch
 X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
@@ -44,7 +63,7 @@ y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
 
 # Модель с трансформером
 class TransformerModel(nn.Module):
-    def __init__(self, input_dim, output_dim, seq_len, num_heads=8, num_layers=8, d_model=64):
+    def __init__(self, input_dim, output_dim, num_heads, num_layers, d_model):
         super(TransformerModel, self).__init__()
         self.d_model = d_model
 
@@ -86,15 +105,13 @@ class TransformerModel(nn.Module):
 # Параметры модели
 input_dim = X_train_tensor.shape[2]
 output_dim = y_train_tensor.shape[1]
-seq_len = X_train_tensor.shape[1]
 
-model = TransformerModel(input_dim=input_dim, output_dim=output_dim, seq_len=seq_len)
+model = TransformerModel(input_dim=input_dim, output_dim=output_dim, 
+                         num_heads=num_heads, num_layers=num_layers, d_model=d_model)
 
 # Настройка параметров обучения
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 criterion = nn.MSELoss()
-epochs = 50
-batch_size = 16
 
 # Обучение модели
 model.train()

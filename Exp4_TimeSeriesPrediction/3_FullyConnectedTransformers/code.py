@@ -1,193 +1,125 @@
+import pandas as pd
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
-import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from bayeformers import to_bayesian
 
-# Датасет для временных рядов
-class TimeSeriesDataset(Dataset):
-    def __init__(self, data, targets):
-        self.data = data
-        self.targets = targets
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return self.data[idx], self.targets[idx]
-
-# Полносвязная модель с двумя слоями и трансформером
-class FullyConnectedModelWithTransformer(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, nhead=8, num_encoder_layers=2):
-        super(FullyConnectedModelWithTransformer, self).__init__()
-        
-        # Один полносвязный слой
-        self.fc = nn.Linear(input_size, hidden_size)
-        
-        # Трансформер (с двумя слоями)
-        self.transformer_layer = nn.TransformerEncoderLayer(d_model=hidden_size, nhead=nhead)
-        self.transformer = nn.TransformerEncoder(self.transformer_layer, num_layers=num_encoder_layers)
-        
-        # Выходной слой
-        self.output_layer = nn.Linear(hidden_size, output_size)
-
-    def forward(self, x):
-        # Применяем один полносвязный слой
-        x = self.fc(x)
-        
-        # Трансформер ожидает вход в формате (seq_len, batch_size, features)
-        # Для этого добавляем размерность для последовательности
-        x = x.unsqueeze(0)  # [1, batch_size, hidden_size] - добавление размерности для seq_len
-        
-        # Применяем трансформер
-        x = self.transformer(x)
-        
-        # Убираем размерность для последовательности
-        x = x.squeeze(0)  # Убираем размерность для seq_len
-        
-        # Прогнозируем выходное значение
-        x = self.output_layer(x)
-        
-        return x
-
-# Заполнение пропущенных данных с использованием линейной интерполяции
-def fill_missing_data(data):
-    # Линейная интерполяция для пропусков
-    return pd.DataFrame(data).interpolate(method='linear', axis=0).values
-
-# Генерация последовательностей с пропущенными днями
-def create_sequences_with_missing_days(data, seq_len, missing_percentage):
-    X_seq, y_seq = [], []
-    for i in range(len(data) - seq_len):
-        sequence = data[i:i+seq_len]
-        num_missing_days = int(seq_len * missing_percentage)
-        missing_indices = np.random.choice(seq_len, num_missing_days, replace=False)
-        sequence[missing_indices] = np.nan  # Пропускаем данные
-        X_seq.append(sequence)
-        y_seq.append(data[i+seq_len, 3])  # Прогнозируем "Close"
-    return X_seq, y_seq
-
-# Функция для обучения модели
-def train_model(model, train_loader, criterion, optimizer, epochs):
-    model.train()
-    for epoch in range(epochs):
-        total_loss = 0
-        for data, targets in train_loader:
-            data, targets = data.to(device), targets.to(device)
-
-            # Прямой проход
-            outputs = model(data)
-
-            # Расчёт потерь
-            loss = criterion(outputs, targets)
-
-            # Обратный проход и обновление весов
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(train_loader):.4f}")
-
-# Функция для тестирования модели
-def test_model(model, test_loader):
-    model.eval()
-    total_loss = 0
-    mae = 0
-    all_targets = []
-    all_outputs = []
-    with torch.no_grad():
-        for data, targets in test_loader:
-            data, targets = data.to(device), targets.to(device)
-            outputs = model(data)
-            loss = criterion(outputs, targets)
-            total_loss += loss.item()
-
-            # Вычисление MAE
-            mae += torch.sum(torch.abs(outputs - targets)).item()
-
-            # Сохранение для вычисления дисперсии
-            all_targets.append(targets)
-            all_outputs.append(outputs)
-
-    # Объединение всех предсказаний и целей
-    all_targets = torch.cat(all_targets, dim=0)
-    all_outputs = torch.cat(all_outputs, dim=0)
-
-    # Вычисление дисперсии
-    variance = torch.mean((all_outputs - all_targets.mean())**2).item()
-
-    print(f"Test Loss: {total_loss/len(test_loader):.4f}")
-    print(f"Mean Absolute Error (MAE): {mae/len(test_loader.dataset):.4f}")
-    print(f"Variance: {variance:.4f}")
+# Ввод параметров с консоли
+num_hidden_layers = int(input("Введите количество скрытых слоев: "))
+test_size_ratio = float(input("Введите долю данных для теста (0.1 - 0.5): "))
 
 # Загрузка данных
-file_path = r"D:\source\нир вр ряды\data\Microsoft_Stock.csv"  # Укажите путь к CSV-файлу
-data = pd.read_csv(file_path)
+data = pd.read_csv("D:\\source\\нир вр ряды\\data\\Microsoft_Stock.csv", sep=',')  # Замените на путь к вашему датасету
 
-# Преобразование столбца Date в datetime и сортировка
-data["Date"] = pd.to_datetime(data["Date"])
-data = data.sort_values("Date")
+# Определяем признаки
+input_features = ['Open', 'High', 'Low', 'Volume']
+columns_to_predict = ['Close']
 
-# Используем только числовые столбцы
-numerical_columns = ["Open", "High", "Low", "Close", "Volume"]
-data = data[numerical_columns]
+# Нормализация данных
+scaler = MinMaxScaler()
+data[input_features + columns_to_predict] = scaler.fit_transform(data[input_features + columns_to_predict])
 
-# Стандартизация данных
-scaler = StandardScaler()
-data_scaled = scaler.fit_transform(data)
+# Создание пропусков
+def create_missing_data(data, missing_percentage=0.1):
+    missing_days = int(len(data) * missing_percentage)
+    missing_indices = np.random.choice(data.index, size=missing_days, replace=False)
+    data.loc[missing_indices, input_features + columns_to_predict] = np.nan
+    return data
 
-# Формирование временных последовательностей с пропущенными днями
-seq_len = 30  # Длина окна (настраиваемая переменная)
-missing_percentage = 0.3  # Примерный процент пропущенных дней
-X_seq, y_seq = create_sequences_with_missing_days(data_scaled, seq_len, missing_percentage)
+data_with_missing = create_missing_data(data.copy(), missing_percentage=0.2)
+data_with_missing.fillna(method='ffill', inplace=True)
 
-# Заполнение пропущенных данных
-X_seq = fill_missing_data(X_seq)
+# Формирование последовательностей
+sequence_length = 30
 
-X_seq = torch.tensor(X_seq, dtype=torch.float32)
-y_seq = torch.tensor(y_seq, dtype=torch.float32).unsqueeze(1)
+def create_sequences(data, input_features, target_columns, seq_length):
+    X, y = [], []
+    for i in range(len(data) - seq_length):
+        X.append(data[input_features].iloc[i:i+seq_length].values)
+        y.append(data[target_columns].iloc[i+seq_length].values)
+    return np.array(X), np.array(y)
 
-# Разделение на обучающую и тестовую выборки
-X_train, X_test, y_train, y_test = train_test_split(X_seq, y_seq, test_size=0.1, random_state=42, shuffle=False)
+X, y = create_sequences(data_with_missing, input_features, columns_to_predict, sequence_length)
 
-# Создание DataLoader
-train_dataset = TimeSeriesDataset(X_train, y_train)
-test_dataset = TimeSeriesDataset(X_test, y_test)
+# Фиксированное разделение данных с использованием random seed
+def fixed_split_data(data, test_size_ratio, random_seed=42):
+    np.random.seed(random_seed)
+    total_size = len(data)
+    test_size = int(total_size * test_size_ratio)
+    all_indices = np.arange(total_size)
+    test_indices = np.random.choice(all_indices, size=test_size, replace=False)
+    train_indices = np.setdiff1d(all_indices, test_indices)
+    
+    train_data = data.iloc[train_indices]
+    test_data = data.iloc[test_indices]
+    
+    return train_data, test_data
 
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+# Разделение данных с фиксированными тестовыми данными
+train_data, test_data = fixed_split_data(data_with_missing, test_size_ratio)
 
-# Параметры модели
-input_size = X_seq.shape[2] * seq_len
-hidden_size = 128
-output_size = 1
+X_train, y_train = create_sequences(train_data, input_features, columns_to_predict, sequence_length)
+X_test, y_test = create_sequences(test_data, input_features, columns_to_predict, sequence_length)
+
+# Подготовка данных
+X_train_tensor = torch.tensor(X_train.reshape(X_train.shape[0], -1), dtype=torch.float32)
+X_test_tensor = torch.tensor(X_test.reshape(X_test.shape[0], -1), dtype=torch.float32)
+y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
+y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
+
+# Определение модели
+class BayesianRegressionModelWithVariance(nn.Module):
+    def __init__(self, input_size, hidden_layer_size, num_hidden_layers):
+        super(BayesianRegressionModelWithVariance, self).__init__()
+        layers = [nn.Linear(input_size, hidden_layer_size), nn.ReLU()]
+        for _ in range(num_hidden_layers - 1):
+            layers.append(nn.Linear(hidden_layer_size, hidden_layer_size))
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden_layer_size, 2))  # Модель предсказывает два значения: среднее и дисперсию
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x):
+        output = self.network(x)
+        mean = output[:, 0]  # Среднее
+        log_variance = output[:, 1]  # Логарифм дисперсии
+        variance = torch.exp(log_variance)  # Дисперсия = exp(логарифм)
+        return mean, variance
 
 # Инициализация модели
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = FullyConnectedModelWithTransformer(input_size, hidden_size, output_size).to(device)
+input_size = X_train_tensor.shape[1]
+hidden_layer_size = 64
+model = BayesianRegressionModelWithVariance(input_size, hidden_layer_size, num_hidden_layers)
 
-# Оптимизатор и функция потерь
-criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+# Преобразование модели в байесовскую
+bayesian_model = to_bayesian(model, delta=0.05, freeze=True)
 
-# Преобразование входных данных для полносвязной сети
-X_train = X_train.view(X_train.size(0), -1)  # [batch_size, seq_len * input_size]
-X_test = X_test.view(X_test.size(0), -1)
-
-# Обновляем DataLoader с новыми размерами
-train_dataset = TimeSeriesDataset(X_train, y_train)
-test_dataset = TimeSeriesDataset(X_test, y_test)
-
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+# Настройка оптимизатора
+optimizer = torch.optim.Adam(bayesian_model.parameters(), lr=0.001)
+epochs = 100
 
 # Обучение модели
-train_model(model, train_loader, criterion, optimizer, epochs=50)
+print("\nНачало обучения...")
+for epoch in range(epochs):
+    bayesian_model.train()
+    optimizer.zero_grad()
+    mean, variance = bayesian_model(X_train_tensor)
+    nll_loss = 0.5 * torch.mean(variance + (y_train_tensor - mean) ** 2 / variance)  # NLL loss
+    nll_loss.backward()
+    optimizer.step()
+    if (epoch + 1) % 10 == 0:
+        print(f"Epoch [{epoch + 1}/{epochs}], Loss: {nll_loss.item():.4f}")
 
-# Тестирование модели
-test_model(model, test_loader)
+# Оценка модели
+print("\nОценка модели...")
+bayesian_model.eval()
+with torch.no_grad():
+    test_mean, test_variance = bayesian_model(X_test_tensor)
+    test_rmse = mean_squared_error(y_test, test_mean.numpy(), squared=False)
+    test_mae = mean_absolute_error(y_test, test_mean.numpy())
+    test_dispersion = test_variance.mean().item()
+
+print(f"\nTest RMSE: {test_rmse:.4f}")
+print(f"Test MAE: {test_mae:.4f}")
+print(f"Test Dispersion (Mean Variance): {test_dispersion:.4f}")

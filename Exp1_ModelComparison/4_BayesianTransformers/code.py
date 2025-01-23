@@ -8,6 +8,10 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from bayeformers import to_bayesian
 import bayeformers.nn as bnn
 
+# Получение параметров с консоли
+num_layers = int(input("Введите количество скрытых слоёв (например, 2): "))
+test_size = float(input("Введите размер тестовой выборки (например, 0.2 для 20%): "))
+
 # 1. Загрузка и подготовка данных
 data = pd.read_csv('student-mat.csv', sep=';')
 
@@ -23,7 +27,7 @@ scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
 # Разделение данных на обучающую и тестовую выборки
-X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=test_size, random_state=42)
 
 # Преобразуем в тензоры
 X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
@@ -53,7 +57,7 @@ class TransformerRegressionModel(nn.Module):
         return self.output_layer(x)
 
 # Инициализация частотной модели
-model = TransformerRegressionModel(input_dim=X_train_tensor.shape[1])
+model = TransformerRegressionModel(input_dim=X_train_tensor.shape[1], num_layers=num_layers)
 
 # 3. Настройка параметров обучения для частотной модели
 criterion = nn.MSELoss()
@@ -96,8 +100,10 @@ for epoch in range(epochs):
 bayesian_model.eval()
 with torch.no_grad():
     test_predictions = bayesian_model(X_test_tensor)
-    test_rmse = mean_squared_error(y_test, test_predictions.numpy(), squared=False)
-    test_mae = mean_absolute_error(y_test, test_predictions.numpy())
+    # Средние предсказания по всем образцам
+    mean_predictions = test_predictions.mean(dim=0)
+    test_rmse = mean_squared_error(y_test, mean_predictions.numpy(), squared=False)
+    test_mae = mean_absolute_error(y_test, mean_predictions.numpy())
 
 print(f"\nTest RMSE: {test_rmse:.4f}")
 print(f"Test MAE: {test_mae:.4f}")
