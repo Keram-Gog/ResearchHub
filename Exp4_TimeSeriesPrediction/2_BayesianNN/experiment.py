@@ -1,9 +1,15 @@
+import sys
+# Добавляем путь к BayeFormers (убедитесь, что путь указан правильно)
+sys.path.append(r'D:\main for my it\my tasks\source\ResearchHub\BayeFormers-master')
+
 import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+# Импорт функции для преобразования модели в байесовскую
 from bayeformers import to_bayesian
 
 # Ввод параметров с консоли
@@ -11,7 +17,7 @@ num_hidden_layers = int(input("Введите количество скрыты�
 test_size_ratio = float(input("Введите долю данных для теста (0.1 - 0.5): "))
 
 # Загрузка данных
-data = pd.read_csv("D:\\source\\нир вр ряды\\data\\Microsoft_Stock.csv", sep=',')  # Замените на путь к вашему датасету
+data = pd.read_csv('D:\\main for my it\\my tasks\\source\\ResearchHub\\Exp4_TimeSeriesPrediction\\data\\Microsoft_Stock.csv', sep=',')  # Замените на путь к вашему датасету
 
 # Определяем признаки
 input_features = ['Open', 'High', 'Low', 'Volume']
@@ -21,7 +27,7 @@ columns_to_predict = ['Close']
 scaler = MinMaxScaler()
 data[input_features + columns_to_predict] = scaler.fit_transform(data[input_features + columns_to_predict])
 
-# Создание пропусков
+# Создание пропусков (искусственно удаляем данные)
 def create_missing_data(data, missing_percentage=0.1):
     missing_days = int(len(data) * missing_percentage)
     missing_indices = np.random.choice(data.index, size=missing_days, replace=False)
@@ -29,6 +35,7 @@ def create_missing_data(data, missing_percentage=0.1):
     return data
 
 data_with_missing = create_missing_data(data.copy(), missing_percentage=0.2)
+# Заполняем пропуски методом "forward fill"
 data_with_missing.fillna(method='ffill', inplace=True)
 
 # Формирование последовательностей
@@ -63,7 +70,7 @@ train_data, test_data = fixed_split_data(data_with_missing, test_size_ratio)
 X_train, y_train = create_sequences(train_data, input_features, columns_to_predict, sequence_length)
 X_test, y_test = create_sequences(test_data, input_features, columns_to_predict, sequence_length)
 
-# Подготовка данных
+# Подготовка данных: преобразуем последовательности в тензоры
 X_train_tensor = torch.tensor(X_train.reshape(X_train.shape[0], -1), dtype=torch.float32)
 X_test_tensor = torch.tensor(X_test.reshape(X_test.shape[0], -1), dtype=torch.float32)
 y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
@@ -77,6 +84,7 @@ class BayesianRegressionModelWithVariance(nn.Module):
         for _ in range(num_hidden_layers - 1):
             layers.append(nn.Linear(hidden_layer_size, hidden_layer_size))
             layers.append(nn.ReLU())
+        # Выходной слой выдаёт два значения: предсказанное значение и логарифм дисперсии
         layers.append(nn.Linear(hidden_layer_size, 2))
         self.network = nn.Sequential(*layers)
 
@@ -84,6 +92,7 @@ class BayesianRegressionModelWithVariance(nn.Module):
         output = self.network(x)
         mean = output[:, 0]
         log_variance = output[:, 1]
+        # Преобразуем логарифм дисперсии в саму дисперсию
         variance = torch.exp(log_variance)
         return mean, variance
 
@@ -105,6 +114,7 @@ for epoch in range(epochs):
     bayesian_model.train()
     optimizer.zero_grad()
     mean, variance = bayesian_model(X_train_tensor)
+    # Негативное логарифмическое правдоподобие (NLL) как функция потерь
     nll_loss = 0.5 * torch.mean(variance + (y_train_tensor - mean) ** 2 / variance)
     nll_loss.backward()
     optimizer.step()
