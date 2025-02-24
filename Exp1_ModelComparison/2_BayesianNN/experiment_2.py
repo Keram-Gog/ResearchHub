@@ -1,30 +1,24 @@
-import numpy as np
+import sys
+sys.path.append(r'D:\main for my it\my tasks\source\ResearchHub\BayeFormers-master')
+from bayeformers import to_bayesian
+import bayeformers.nn as bnn
+
 import pandas as pd
+import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+
 from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_absolute_error
 
-class DynamicRegressionModel(torch.nn.Module):
-    def __init__(self, input_dim, num_layers):
-        super(DynamicRegressionModel, self).__init__()
-        self.layers = torch.nn.ModuleList()
-        for _ in range(num_layers):
-            self.layers.append(torch.nn.Linear(input_dim, 1))
-        self.final_layer = torch.nn.Linear(input_dim, 1)
+# -- Для воспроизводимости экспериментов:
+np.random.seed(42)
+torch.manual_seed(42)
+torch.backends.cudnn.deterministic = True
 
-    def forward(self, x):
-        out = x
-        for layer in self.layers:
-            out = F.relu(layer(out))
-        return self.final_layer(out)
-
-def to_bayesian(model, delta=0.05, freeze=True):
-    # Добавление байесовских параметров, для простоты, вместо реального превращения в байесовский слой
-    for param in model.parameters():
-        param.requires_grad = not freeze
-    return model
-
+# ======== 1. Функция sMAPE ========
 def smape(y_true, y_pred):
     """
     Вычисляет Symmetric Mean Absolute Percentage Error (sMAPE), в %.
@@ -33,20 +27,11 @@ def smape(y_true, y_pred):
     """
     y_true = np.array(y_true, dtype=np.float32)
     y_pred = np.array(y_pred, dtype=np.float32)
-
-    # Обработка нулевых значений в true и pred
-    y_true = np.where(np.abs(y_true) < 1e-8, 1e-8, y_true)  # Минимизируем значения
-    y_pred = np.where(np.abs(y_pred) < 1e-8, 1e-8, y_pred)  # Минимизируем значения
-
-    # Ограничиваем величину предсказаний, чтобы не выходили за пределы
-    y_true = np.clip(y_true, 1e-8, np.inf)
-    y_pred = np.clip(y_pred, 1e-8, np.inf)
-
-    # Вычисление sMAPE
     return 100.0 * np.mean(
         2.0 * np.abs(y_true - y_pred) / (np.abs(y_true) + np.abs(y_pred) + 1e-8)
     )
 
+# ======== 2. Функция, вносящая "разреженность" (sparsity) ========
 def introduce_sparsity(X, fraction):
     """
     fraction - доля элементов, которые заменяются на NaN.
@@ -57,12 +42,32 @@ def introduce_sparsity(X, fraction):
     X_sp[mask] = np.nan
     return X_sp
 
+# ======== 3. Базовый класс (до байес-преобразования) ========
+class DynamicRegressionModel(nn.Module):
+    def __init__(self, input_size, num_layers):
+        super(DynamicRegressionModel, self).__init__()
+        layers = []
+        current_size = input_size
+        
+        for _ in range(num_layers):
+            layers.append(nn.Linear(current_size, max(current_size // 2, 1)))
+            layers.append(nn.ReLU())
+            current_size = max(current_size // 2, 1)
+        
+        # Выходной слой
+        layers.append(nn.Linear(current_size, 1))
+        
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.network(x)
+
 def main():
     # ======== 4. Загрузка данных ========
     try:
         data = pd.read_csv(
-            'D:\\main for my it\\my tasks\\source\\ResearchHub\\Exp2_CorrelationDataAnalysis\\data\\nifty_500.csv',
-            sep=','
+            'D:\\main for my it\\my tasks\\source\\ResearchHub\\Exp1_ModelComparison\\data\\student-mat.csv',
+            sep=';'
         )
         print("Данные успешно загружены!")
     except Exception as e:
@@ -70,15 +75,19 @@ def main():
         return
 
     # ======== 5. Подготовка X и y ========
-    X = data.drop(columns=['Last Traded Price', 'Company Name', 'Symbol'])  # Признаки
-    y = data['Last Traded Price']                                          # Целевой столбец
+    X = data.drop(columns=['G3'])  # Признаки
+    y = data['G3']                # Целевой столбец
     
     # Преобразуем категориальные в One-Hot
     X = pd.get_dummies(X)
     
-    # Масштабируем
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    # Масштабируем X
+    scaler_X = StandardScaler()
+    X_scaled = scaler_X.fit_transform(X)
+
+    # Масштабируем y (ВАЖНО!)
+    scaler_y = StandardScaler()
+    y_scaled = scaler_y.fit_transform(y.values.reshape(-1, 1)).ravel()
 
     # ======== 6. Параметры перебора ========
     size_options = [1.0, 0.5, 0.25, 0.1]       # 100%, 50%, 25%, 10%
@@ -96,26 +105,28 @@ def main():
         for sparsity in sparsity_options:
             # -- Имитация sparsity
             X_sp = introduce_sparsity(X_scaled, fraction=sparsity)
-            # -- Заполняем NaN нулями (можно заменить на любой другой способ)
-            X_sp = np.nan_to_num(X_sp, nan=0.0)
+            
+            # -- Заполняем NaN средними значениями
+            imputer = SimpleImputer(strategy='mean')
+            X_sp = imputer.fit_transform(X_sp)
 
-            # -- train_size
+            # -- Определяем количество обучающих примеров
             train_size = int(len(X_sp) * size)
             if train_size < 1 or train_size >= len(X_sp):
                 print(f"[Пропуск] size={size} -> train_size={train_size} недопустимо.")
                 continue
 
-            # -- Разделяем (без shuffle)
+            # -- Разделяем на train/test
             X_train = X_sp[:train_size]
-            y_train = y[:train_size]
+            y_train = y_scaled[:train_size]
             X_test  = X_sp[train_size:]
-            y_test  = y[train_size:]
+            y_test  = y_scaled[train_size:]
 
-            # -- Тензоры
+            # -- Преобразуем в тензоры
             X_train_t = torch.tensor(X_train, dtype=torch.float32)
-            y_train_t = torch.tensor(y_train.values, dtype=torch.float32).view(-1, 1)
+            y_train_t = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
             X_test_t  = torch.tensor(X_test,  dtype=torch.float32)
-            y_test_t  = torch.tensor(y_test.values,  dtype=torch.float32).view(-1, 1)
+            y_test_t  = torch.tensor(y_test,  dtype=torch.float32).view(-1, 1)
 
             input_dim = X_train_t.shape[1]
 
@@ -142,11 +153,15 @@ def main():
                 # ======== 9. Оценка ========
                 bayesian_model.eval()
                 with torch.no_grad():
-                    test_pred = bayesian_model(X_test_t).numpy().ravel()
+                    test_pred = bayesian_model(X_test_t).numpy()
+                    test_pred = scaler_y.inverse_transform(test_pred).ravel()  # Возвращаем к исходному масштабу
+
+                # Преобразуем y_test обратно
+                y_test_orig = scaler_y.inverse_transform(y_test_t.numpy()).ravel()
 
                 # Метрики
-                test_mae = mean_absolute_error(y_test, test_pred)
-                test_smape = smape(y_test, test_pred)
+                test_mae = mean_absolute_error(y_test_orig, test_pred)
+                test_smape = smape(y_test_orig, test_pred)
                 test_variance = np.var(test_pred)
 
                 results.append({

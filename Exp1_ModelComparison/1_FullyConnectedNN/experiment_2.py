@@ -1,20 +1,16 @@
-import sys
-sys.path.append(r'D:\main for my it\my tasks\source\ResearchHub\BayeFormers-master')
-from bayeformers import to_bayesian
-import bayeformers.nn as bnn
-
 import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_absolute_error
 
-# -- Для воспроизводимости экспериментов:
+# -- Для воспроизводимости:
 np.random.seed(42)
 torch.manual_seed(42)
+torch.backends.cudnn.deterministic = True
 
 # ======== 1. Функция sMAPE ========
 def smape(y_true, y_pred):
@@ -40,7 +36,7 @@ def introduce_sparsity(X, fraction):
     X_sp[mask] = np.nan
     return X_sp
 
-# ======== 3. Базовый класс (до байес-преобразования) ========
+# ======== 3. Класс динамической сети ========
 class DynamicRegressionModel(nn.Module):
     def __init__(self, input_size, num_layers):
         super(DynamicRegressionModel, self).__init__()
@@ -60,8 +56,9 @@ class DynamicRegressionModel(nn.Module):
     def forward(self, x):
         return self.network(x)
 
+# ======== 4. Основной скрипт ========
 def main():
-    # ======== 4. Загрузка данных ========
+    # 4.1. Загрузка данных
     try:
         data = pd.read_csv(
             'D:\\main for my it\\my tasks\\source\\ResearchHub\\Exp1_ModelComparison\\data\\student-mat.csv',
@@ -71,8 +68,8 @@ def main():
     except Exception as e:
         print(f"Ошибка при загрузке данных: {e}")
         return
-
-    # ======== 5. Подготовка X и y ========
+    
+    # 4.2. Подготовка X и y
     X = data.drop(columns=['G3'])  # Признаки
     y = data['G3']                # Целевой столбец
     
@@ -80,99 +77,103 @@ def main():
     X = pd.get_dummies(X)
     
     # Масштабируем
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-
-    # ======== 6. Параметры перебора ========
+    scaler_X = StandardScaler()
+    X_scaled = scaler_X.fit_transform(X)
+    
+    # Масштабируем y (ВАЖНО!)
+    scaler_y = StandardScaler()
+    y_scaled = scaler_y.fit_transform(y.values.reshape(-1, 1)).ravel()
+    
+    # 4.3. Параметры перебора
     size_options = [1.0, 0.5, 0.25, 0.1]       # 100%, 50%, 25%, 10%
     sparsity_options = [0.0, 0.25, 0.5, 0.9]   # 0%, 25%, 50%, 90%
     layer_options = [1, 2, 4, 6, 8, 10, 12]    # Сколько слоёв
-
+    
     epochs = 100
     learning_rate = 0.0001
-    weight_decay = 0.0001
-
-    results = []
-
-    # ======== 7. Цикл по Size / Sparsity / Complexity ========
+    weight_decay = 0.0001  # <-- важное изменение
+    
+    results = []  # Сюда будем складывать результаты (MAE, sMAPE, Variance)
+    
+    # 4.4. Перебор параметров
     for size in size_options:
         for sparsity in sparsity_options:
-            # -- Имитация sparsity
+            # -- Вносим sparsity в данные:
             X_sp = introduce_sparsity(X_scaled, fraction=sparsity)
-            # -- Заполняем NaN нулями (можно заменить на любой другой способ)
-            X_sp = np.nan_to_num(X_sp, nan=0.0)
-
-            # -- train_size
+            
+            # -- Заполняем NaN средними значениями:
+            imputer = SimpleImputer(strategy='mean')
+            X_sp = imputer.fit_transform(X_sp)
+            
+            # -- Определяем количество обучающих примеров
             train_size = int(len(X_sp) * size)
             if train_size < 1 or train_size >= len(X_sp):
                 print(f"[Пропуск] size={size} -> train_size={train_size} недопустимо.")
                 continue
-
-            # -- Разделяем (без shuffle)
+            
+            # -- Разделяем на train/test
             X_train = X_sp[:train_size]
-            y_train = y[:train_size]
-            X_test  = X_sp[train_size:]
-            y_test  = y[train_size:]
-
-            # -- Тензоры
+            y_train = y_scaled[:train_size]
+            
+            X_test = X_sp[train_size:]
+            y_test = y_scaled[train_size:]
+            
+            # -- Преобразуем в тензоры
             X_train_t = torch.tensor(X_train, dtype=torch.float32)
-            y_train_t = torch.tensor(y_train.values, dtype=torch.float32).view(-1, 1)
-            X_test_t  = torch.tensor(X_test,  dtype=torch.float32)
-            y_test_t  = torch.tensor(y_test.values,  dtype=torch.float32).view(-1, 1)
-
+            y_train_t = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
+            
+            X_test_t = torch.tensor(X_test, dtype=torch.float32)
+            y_test_t = torch.tensor(y_test, dtype=torch.float32).view(-1, 1)
+            
             input_dim = X_train_t.shape[1]
-
+            
+            # 4.5. Перебираем число слоёв
             for num_layers in layer_options:
-                # 1) Создаём классическую сеть
-                base_model = DynamicRegressionModel(input_dim, num_layers)
-                # 2) Преобразуем её в байесовскую
-                bayesian_model = to_bayesian(base_model, delta=0.05, freeze=True)
-
-                # -- Оптимизатор Adam
-                optimizer = torch.optim.Adam(bayesian_model.parameters(), 
-                                             lr=learning_rate, 
-                                             weight_decay=weight_decay)
-
-                # ======== 8. Обучение ========
+                model = DynamicRegressionModel(input_dim, num_layers)
+                
+                # -- Оптимизатор Adam с lr=0.0001 и weight_decay=0.0001
+                optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+                criterion = nn.MSELoss()
+                
+                # -- Обучение
                 for epoch in range(epochs):
-                    bayesian_model.train()
+                    model.train()
                     optimizer.zero_grad()
-                    pred = bayesian_model(X_train_t)
-                    loss = F.mse_loss(pred, y_train_t)
+                    pred = model(X_train_t)
+                    loss = criterion(pred, y_train_t)
                     loss.backward()
                     optimizer.step()
-
-                # ======== 9. Оценка ========
-                bayesian_model.eval()
+                
+                # -- Оценка
+                model.eval()
                 with torch.no_grad():
-                    test_pred = bayesian_model(X_test_t).numpy().ravel()
-
-                # Метрики
-                test_mae = mean_absolute_error(y_test, test_pred)
-                test_smape = smape(y_test, test_pred)
-                test_variance = np.var(test_pred)
-
-                # При желании RMSE (не обязательно, но если нужно):
-                # from sklearn.metrics import mean_squared_error
-                # test_rmse = mean_squared_error(y_test, test_pred, squared=False)
-
+                    test_pred = model(X_test_t).numpy()
+                    test_pred = scaler_y.inverse_transform(test_pred).ravel()  # Возвращаем к исходному масштабу
+                
+                # Преобразуем y_test обратно
+                y_test_orig = scaler_y.inverse_transform(y_test_t.numpy()).ravel()
+                
+                test_mae = mean_absolute_error(y_test_orig, test_pred)
+                test_var = np.var(test_pred)
+                test_smape = smape(y_test_orig, test_pred)
+                
                 results.append({
                     'size': size,
                     'sparsity': sparsity,
                     'num_layers': num_layers,
                     'mae': test_mae,
                     'smape': test_smape,
-                    'variance': test_variance
-                    # 'rmse': test_rmse
+                    'variance': test_var
                 })
-
-                print(f"[BayesFCNN] Size={size}, Spars={sparsity}, Layers={num_layers} "
-                      f"-> MAE={test_mae:.4f}, sMAPE={test_smape:.2f}%, Var={test_variance:.4f}")
-
-    # ======== 10. Сохраняем результаты ========
+                
+                print(f"Size={size}, Sparsity={sparsity}, Layers={num_layers} "
+                      f"-> MAE={test_mae:.4f}, sMAPE={test_smape:.2f}%, Var={test_var:.4f}")
+    
+    # 4.6. Сохраняем результаты
     results_df = pd.DataFrame(results)
-    results_df.to_csv('FCNN_bayes_results.csv', index=False)
-    print("\nЭксперименты завершены. Итоги в 'FCNN_bayes_results.csv'.")
+    results_df.to_csv('FCNN_classic_results.csv', index=False)
+    print("\nЭксперименты завершены. Итоги в 'FCNN_classic_results.csv'.")
 
+# Запуск
 if __name__ == '__main__':
     main()

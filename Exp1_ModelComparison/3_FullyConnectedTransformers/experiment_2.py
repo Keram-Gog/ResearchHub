@@ -5,11 +5,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
 from sklearn.metrics import mean_absolute_error
 
 # -- Для воспроизводимости
 np.random.seed(42)
 torch.manual_seed(42)
+torch.backends.cudnn.deterministic = True
 
 # ======== 1. Функция sMAPE ========
 def smape(y_true, y_pred):
@@ -24,7 +26,7 @@ def smape(y_true, y_pred):
         2.0 * np.abs(y_true - y_pred) / (np.abs(y_true) + np.abs(y_pred) + 1e-8)
     )
 
-# ======== 2. Функция вносящая "разреженность" (sparsity) ========
+# ======== 2. Функция, вносящая "разреженность" (sparsity) ========
 def introduce_sparsity(X, fraction):
     """
     fraction - доля элементов, которые заменяются на NaN.
@@ -54,7 +56,6 @@ class TransformerModel(nn.Module):
         self.input_projection = nn.Linear(input_dim, d_model)
         
         # Параметр для псевдо-позиционного кодирования
-        # Допустим, у нас seq_len=1, но всё равно заведём PE для демонстрации
         self.positional_encoding = nn.Parameter(torch.randn(1, 1, d_model))
         
         # Создаём слои трансформера (batch_first=True)
@@ -117,9 +118,13 @@ def main():
     # One-Hot для категориальных
     X = pd.get_dummies(X)
     
-    # Масштабирование
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    # Масштабирование X
+    scaler_X = StandardScaler()
+    X_scaled = scaler_X.fit_transform(X)
+
+    # Масштабирование y (ВАЖНО!)
+    scaler_y = StandardScaler()
+    y_scaled = scaler_y.fit_transform(y.values.reshape(-1, 1)).ravel()
 
     # ======== 6. Параметры перебора ========
     size_options = [1.0, 0.5, 0.25, 0.1]       # 100%, 50%, 25%, 10%
@@ -137,26 +142,28 @@ def main():
         for sparsity in sparsity_options:
             # -- Имитация sparsity
             X_sp = introduce_sparsity(X_scaled, fraction=sparsity)
-            # -- Простейшая "заплатка" NaN => 0
-            X_sp = np.nan_to_num(X_sp, nan=0.0)
+            
+            # -- Заполняем NaN средними значениями
+            imputer = SimpleImputer(strategy='mean')
+            X_sp = imputer.fit_transform(X_sp)
             
             train_size = int(len(X_sp) * size)
             if train_size < 1 or train_size >= len(X_sp):
                 print(f"[Пропуск] size={size} -> train_size={train_size} недопустимо.")
                 continue
             
-            # -- Разделяем (без shuffle) первые train_size в train, остальные в test
+            # -- Разделяем на train/test
             X_train = X_sp[:train_size]
-            y_train = y[:train_size]
+            y_train = y_scaled[:train_size]
             X_test  = X_sp[train_size:]
-            y_test  = y[train_size:]
+            y_test  = y_scaled[train_size:]
             
-            # -- Тензоры
+            # -- Преобразуем в тензоры
             X_train_t = torch.tensor(X_train, dtype=torch.float32)
-            y_train_t = torch.tensor(y_train.values, dtype=torch.float32).view(-1, 1)
+            y_train_t = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
             
             X_test_t = torch.tensor(X_test, dtype=torch.float32)
-            y_test_t = torch.tensor(y_test.values, dtype=torch.float32).view(-1, 1)
+            y_test_t = torch.tensor(y_test, dtype=torch.float32).view(-1, 1)
 
             input_dim = X_train_t.shape[1]
 
@@ -180,11 +187,16 @@ def main():
                 # ======== 9. Оценка ========
                 model.eval()
                 with torch.no_grad():
-                    test_pred = model(X_test_t).numpy().ravel()
-                
-                test_mae = mean_absolute_error(y_test, test_pred)
+                    test_pred = model(X_test_t).numpy()
+                    test_pred = scaler_y.inverse_transform(test_pred).ravel()  # Возвращаем к исходному масштабу
+
+                # Преобразуем y_test обратно
+                y_test_orig = scaler_y.inverse_transform(y_test_t.numpy()).ravel()
+
+                # Метрики
+                test_mae = mean_absolute_error(y_test_orig, test_pred)
                 test_variance = np.var(test_pred)
-                test_smape = smape(y_test, test_pred)
+                test_smape = smape(y_test_orig, test_pred)
                 
                 results.append({
                     'size': size,

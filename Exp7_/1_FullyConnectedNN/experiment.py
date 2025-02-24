@@ -65,3 +65,5 @@ for test_size in test_sizes:
 results_df = pd.DataFrame(results)
 results_df.to_csv(r"D:\main for my it\my tasks\source\ResearchHub\Exp7_\1_FullyConnectedNN\mlp_results.csv", index=False)
 print("Результаты сохранены в 'mlp_results.csv'")
+
+
